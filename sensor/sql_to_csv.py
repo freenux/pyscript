@@ -82,12 +82,16 @@ def save_to_csv(data, output_file, append=False, logger=None):
     """
     将CSV格式的数据保存到文件
     """
-    mode = 'a' if append else 'w'
-
+    # 检查文件是否存在且不为空
+    file_exists = os.path.exists(output_file) and os.path.getsize(output_file) > 0
+    
+    # 确定写入模式
+    mode = 'a' if append and file_exists else 'w'
+    
     lines_count = 0
     with open(output_file, mode, encoding='utf-8') as f:
         # 如果是追加模式且文件已存在且不为空，则不写入CSV头部
-        if append and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+        if append and file_exists:
             # 跳过CSV的第一行（标题行）
             lines = data.strip().split('\n')
             if len(lines) > 1:

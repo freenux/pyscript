@@ -1,4 +1,4 @@
-select time,distinct_id,u.second_id,u.first_id,passback_content 
+select time,distinct_id,u.idfa,u.second_id,u.first_id,passback_content 
 from events e inner join users u
 on e.user_id = u.id
 where 
