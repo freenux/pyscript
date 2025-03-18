@@ -121,6 +121,23 @@ def fix_json_content(content):
     # 返回修复后的JSON字符串
     return json.dumps(result)
 
+def extract_conversion_data(content):
+    """从 passback_content 中提取 campaign, adgroup 和 creative 信息"""
+    try:
+        if not content:
+            return "", ""
+        
+        data = json.loads(content)
+        if data.get('af_status', '') == 'Organic':
+            return "", ""
+        
+        campaign = data.get('campaign', '')
+        idfa = data.get('idfa', '')
+        return campaign,idfa
+    except (json.JSONDecodeError, TypeError):
+        print(f"无法解析JSON: {content}, 错误: {e}")
+        return "",""
+    
 def convert_to_adjust(input_file, idfa_output_file, idfv_output_file):
     """将输入 CSV 转换为两个指定格式的输出 CSV"""
     # 用于存储每个 ID 的最早记录
@@ -128,7 +145,6 @@ def convert_to_adjust(input_file, idfa_output_file, idfv_output_file):
     idfv_records = dict()
     
     with open(input_file, 'r', encoding='utf-8') as infile:
-        
         reader = csv.DictReader(infile, delimiter='\t')
         for row in reader:
             first_id = row.get('first_id', '')
@@ -138,41 +154,28 @@ def convert_to_adjust(input_file, idfa_output_file, idfv_output_file):
             
             # 使用修复函数处理JSON内容
             fixed_content = fix_json_content(content)
-            try:
-                campaign = json.loads(fixed_content).get('campaign', '')
-            except json.JSONDecodeError as e:
-                print(f"修复后仍无法解析JSON: {content}, 错误: {e}")
-                campaign = ''
+            campaign,conv_idfa = extract_conversion_data(fixed_content)
 
             timestamp = convert_to_unix_timestamp(time_str)
             if timestamp is None:
                 timestamp = 1577808000 # 2020-01-01 00:00:00
             
-            data = [''] * 6
-            data[1] = timestamp
-            data[2] = 'imported devices'
-            data[3] = campaign  # 添加campaign信息
-            
-            idfv = first_id if first_id != idfa else ''
+            idfv = first_id if first_id != idfa and first_id != conv_idfa else ''
 
             if is_valid_device_id(idfa) and idfa_records.get(idfa) is None:
-                data_copy = data.copy()  # 创建数据的副本
-                data_copy[0] = idfa
-                idfa_records[idfa] = data_copy
+                idfa_records[idfa] = [idfa, timestamp, 'imported devices', campaign, '', '']
                 
             if is_valid_device_id(idfv) and idfv_records.get(idfv) is None:
-                data_copy = data.copy()  # 创建数据的副本
-                data_copy[0] = idfv
-                idfv_records[idfv] = data_copy
+                idfv_records[idfv] = [idfv, timestamp, 'imported devices', campaign, '', '']
                 
         with open(idfa_output_file, 'w', encoding='utf-8', newline='') as outfile:
-            writer = csv.writer(outfile)
+            writer = csv.writer(outfile, lineterminator='\n')
             writer.writerow(['device_id', 'unix_timestamp', 'network', 'campaign', 'adgroup', 'creative'])
             for record in idfa_records.values():
                 writer.writerow(record)
             
         with open(idfv_output_file, 'w', encoding='utf-8', newline='') as outfile:
-            writer = csv.writer(outfile)
+            writer = csv.writer(outfile, lineterminator='\n')
             writer.writerow(['device_id', 'unix_timestamp', 'network', 'campaign', 'adgroup', 'creative'])
             for record in idfv_records.values():
                 writer.writerow(record)
