@@ -34,7 +34,14 @@ def extract_campaign_info(passback_content):
         if not passback_content:
             return "", "", ""
         
-        data = json.loads(passback_content)
+        try:
+            data = json.loads(passback_content)
+        except json.JSONDecodeError:
+            data = json.loads(fix_json_content(passback_content))
+        
+        if data.get('af_status', '') == 'Organic':
+            return "", "", ""
+        
         campaign = data.get('campaign', '')
         adgroup = ''
         creative = ''
@@ -42,6 +49,93 @@ def extract_campaign_info(passback_content):
         return campaign, adgroup, creative
     except (json.JSONDecodeError, TypeError):
         return "", "", ""
+
+def fix_json_content(content):
+    """
+    尝试修复被截断或格式错误的JSON字符串
+    """
+    if not content:
+        return '{}'
+    
+    # 如果已经是有效的JSON，直接返回
+    try:
+        json.loads(content)
+        return content
+    except json.JSONDecodeError:
+        pass
+    
+    # 处理常见的截断情况
+    try:
+        # 确保以 { 开头
+        if not content.strip().startswith('{'):
+            content = '{' + content
+        
+        # 确保以 } 结尾
+        if not content.strip().endswith('}'):
+            content = content + '}'
+        
+        # 尝试解析，如果成功则返回
+        json.loads(content)
+        return content
+    except json.JSONDecodeError:
+        pass
+    
+    # 更复杂的修复尝试
+    try:
+        # 移除最后一个可能不完整的键值对
+        if content.rstrip().endswith(','):
+            content = content.rstrip().rstrip(',') + '}'
+        
+        # 如果最后一个字段被截断，尝试找到最后一个完整的键值对
+        last_comma = content.rfind(',')
+        if last_comma > 0:
+            content = content[:last_comma] + '}'
+            
+            # 尝试解析
+            json.loads(content)
+            return content
+    except json.JSONDecodeError:
+        pass
+    
+    # 如果所有尝试都失败，提取所有可能的键值对
+    result = {}
+    try:
+        # 移除首尾的大括号
+        content = content.strip()
+        if content.startswith('{'): 
+            content = content[1:]
+        if content.endswith('}'): 
+            content = content[:-1]
+        
+        # 按逗号分割
+        pairs = content.split(',')
+        for pair in pairs:
+            if ':' in pair:
+                key, value = pair.split(':', 1)
+                key = key.strip().strip('"\'')
+                value = value.strip()
+                
+                # 尝试解析值
+                try:
+                    if value.startswith('"') and value.endswith('"'):
+                        value = value[1:-1]
+                    elif value.lower() == 'true':
+                        value = True
+                    elif value.lower() == 'false':
+                        value = False
+                    elif value.isdigit():
+                        value = int(value)
+                    elif value.replace('.', '', 1).isdigit():
+                        value = float(value)
+                except:
+                    pass
+                
+                result[key] = value
+    except Exception:
+        pass
+    
+    # 返回修复后的JSON字符串
+    return json.dumps(result)
 
 def convert_csv(input_file, android_output_file, gaid_output_file):
     """将输入 CSV 转换为两个指定格式的输出 CSV"""
@@ -65,7 +159,6 @@ def convert_csv(input_file, android_output_file, gaid_output_file):
             # 提取 campaign 信息
             campaign, adgroup, creative = extract_campaign_info(passback_content)
             
-            print(f"first_id: {first_id}, ", is_valid_android_id(first_id))
             # 处理 android_id
             if is_valid_android_id(first_id):
                 android_id = first_id
@@ -73,7 +166,7 @@ def convert_csv(input_file, android_output_file, gaid_output_file):
                 if timestamp < android_records[android_id]["timestamp"]:
                     android_records[android_id] = {
                         "timestamp": timestamp,
-                        "data": [android_id, timestamp, "ImportedDevices", campaign, adgroup, creative]
+                        "data": [android_id, timestamp, "imported devices", campaign, adgroup, creative]
                     }
             
             # 处理 gaid
@@ -83,29 +176,28 @@ def convert_csv(input_file, android_output_file, gaid_output_file):
                 if is_valid_gaid(potential_gaid):
                     gaid = potential_gaid
                 
-                print(f"gaid: {gaid}, ", is_valid_gaid(gaid))
                 if is_valid_gaid(gaid):
                     # 只保留时间戳最早的记录
                     if timestamp < gaid_records[gaid]["timestamp"]:
                         gaid_records[gaid] = {
                             "timestamp": timestamp,
-                            "data": [gaid, timestamp, "ImportedDevices", campaign, adgroup, creative]
+                            "data": [gaid, timestamp, "imported devices", campaign, adgroup, creative]
                         }
             except (json.JSONDecodeError, TypeError):
                 pass
     
     # 写入 android_id 文件
     with open(android_output_file, 'w', encoding='utf-8', newline='') as outfile:
-        writer = csv.writer(outfile)
+        writer = csv.writer(outfile, lineterminator='\n')
         writer.writerow(['device_id', 'unix_timestamp', 'network', 'campaign', 'adgroup', 'creative'])
         
         for record in android_records.values():
             if record["data"]:
                 writer.writerow(record["data"])
-    
+
     # 写入 gaid 文件
     with open(gaid_output_file, 'w', encoding='utf-8', newline='') as outfile:
-        writer = csv.writer(outfile)
+        writer = csv.writer(outfile, lineterminator='\n')
         writer.writerow(['device_id', 'unix_timestamp', 'network', 'campaign', 'adgroup', 'creative'])
         
         for record in gaid_records.values():
