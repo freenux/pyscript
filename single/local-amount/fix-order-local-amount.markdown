@@ -1,0 +1,39 @@
+## 用python实现一个脚本修改订单表的本地价格字段
+
+### 处理逻辑
+- 业务系统订单表结构
+ CREATE TABLE `jingyu_prepaid` (
+                  `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '订单ID',
+                  `qid` bigint unsigned NOT NULL DEFAULT '0' COMMENT '用户ID',
+                  `pay_way` smallint unsigned NOT NULL DEFAULT '0' COMMENT '支付方式',
+                  `pc_trans_id` bigint unsigned NOT NULL DEFAULT '0' COMMENT '支付系统的交易ID',
+                  `pc_finish_time` timestamp NOT NULL DEFAULT '0000-00-00 00:00:00' COMMENT '支付完成时间',
+                  `local_amount` varchar(32) DEFAULT NULL COMMENT '本地货币金额，格式{currency}{amount}'
+                  PRIMARY KEY (`id`),
+                  KEY `pc_finish_time` (`pc_finish_time`),
+                ) ENGINE=InnoDB AUTO_INCREMENT=5339924342 DEFAULT CHARSET=utf8mb3
+- 遍历一定时间内的业务系统订单表，根据qid和pc_trans_id和pay_way去点系统或者支付系统查询支付渠道的交易ID
+如果pay_way是3和4，则直接查询点系统的交易表获取支付渠道订单ID up_order_num，否则从点系统的up_order_num获取到支付系统的订单Id，再从支付系统的交易表获取支付渠道的订单ID bank_trade_code;
+点系统的交易表结构如下：
+CREATE TABLE `t_translog_00` (
+                `trans_id` int unsigned NOT NULL AUTO_INCREMENT COMMENT '点系统的交易ID',
+                `qid` bigint unsigned NOT NULL DEFAULT '0' COMMENT '用户ID',
+                `up_order_num` varchar(48) DEFAULT NULL COMMENT '如果支付方式是Google和Apple，则是支付渠道的订单号，否则是支付系统的订单号',
+                PRIMARY KEY (`trans_id`)
+              ) ENGINE=InnoDB AUTO_INCREMENT=171178543 DEFAULT CHARSET=gbk COMMENT='点系统的交易表，根据qid后两位数字分100个表';
+支付系统的交易表结构如下：
+CREATE TABLE `t_translog_00` (
+                `inner_trade_code` bigint unsigned DEFAULT NULL COMMENT '支付系统的交易ID',
+                `bank_trade_code` varchar(50) DEFAULT NULL COMMENT '支付渠道的交易ID',
+                UNIQUE KEY `inner_trade_code` (`inner_trade_code`)
+              ) ENGINE=InnoDB AUTO_INCREMENT=20790450 DEFAULT CHARSET=utf8mb3 COMMENT='支付系统的交易表，根据qid后两位数字分100个表';
+- 获取到支付渠道的订单Id后，根据支付方式的不同，调用对应的支付渠道的API接口或者读取支付渠道down下来的本地订单文件获取交易信息，（API获取到的交易信息保存到json文件中），同时获取本地货币和本地金额，更新业务订单表的local_amount字段
+
+### 程序要求
+- 使用Python编写，使用选项传入参数，--dsn_alias传入不同表的数据库名称，根据dsn alias到mycli的配置文件读取数据库连接配置
+- 打印日志，记录以上步骤的过程
+- .env文件保存各种支付渠道的密钥信息
+- pymysql执行SQL语句，--debug参数为true时，只是打印SQL语句而不执行SQL语句
+- 支付方式和支付渠道的配置文件在payment_methods.json中，只处理Apple、Google和Adyen支付渠道的数据，但支持其他支付渠道的扩展
+- 只有Apple支付渠道需要根据API获取订单信息，其他支付渠道需要根据本地文件获取订单信息
+- Apple支付渠道获取支付信息的API接口是https://developer.apple.com/documentation/appstoreserverapi/get-transaction-info
