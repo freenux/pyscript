@@ -1,4 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
 .env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
 .DS_Store
-__pycache__
-*.log
+
+# Data and logs directories (keep directories but ignore contents)
+*/data/*
+!data/.gitkeep
+*/logs/*
+!logs/.gitkeep
