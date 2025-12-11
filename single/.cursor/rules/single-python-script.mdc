@@ -1,0 +1,214 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: Single python script boilerplate 
+globs:
+alwaysApply: false
+---
+
+# Single Python Script Development Guide
+
+## Project Structure
+This project follows a single-script architecture pattern where each Python file is a standalone executable script. Key dependencies are managed through [pyproject.toml](mdc:pyproject.toml).
+
+## Standard Script Template
+Every Python script should follow this structure:
+
+```python
+#!/usr/bin/env python3
+"""
+Script description and purpose
+"""
+import argparse
+import logging
+import sys
+from typing import Optional
+import pymysql
+from pymysql.cursors import DictCursor
+
+def setup_logging(level: str = "INFO") -> None:
+    """Configure logging with appropriate format and level."""
+    logging.basicConfig(
+        level=getattr(logging, level.upper()),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('script.log'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
+def parse_mycli_config(mycli_config: str, dsn_name: str) -> dict:
+    """Parse mycli config file and extract database connection parameters."""
+    import os
+    from urllib.parse import urlparse
+    
+    config_path = mycli_config
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"mycli config file not found at {config_path}")
+    
+    dsn_line = None
+    with open(config_path, 'r') as f:
+        for line in f:
+            if line.strip().startswith(f"{dsn_name} = "):
+                dsn_line = line.strip()[len(f"{dsn_name} = "):]
+                break
+    
+    if not dsn_line:
+        raise ValueError(f"DSN {dsn_name} not found in mycli config")
+    
+    # Parse DSN format: mysql://[user[:password]@][host][:port][/dbname]
+    if not dsn_line.startswith('mysql://'):
+        raise ValueError(f"Invalid DSN format: {dsn_line}")
+    
+    parsed = urlparse(dsn_line)
+    db_config = {
+        'host': parsed.hostname or 'localhost',
+        'user': parsed.username,
+        'password': parsed.password or '',
+        'port': parsed.port or 3306,
+        'database': parsed.path.lstrip('/') if parsed.path else '',
+        'charset': 'utf8mb4',
+        'cursorclass': pymysql.cursors.DictCursor
+    }
+    
+    return db_config
+
+def setup_database_connection(db_config: dict) -> pymysql.Connection:
+    """Create and return a MySQL database connection using config dict."""
+    try:
+        connection = pymysql.connect(**db_config)
+        logging.info(f"Connected to database: {db_config['database']}")
+        return connection
+    except Exception as e:
+        logging.error(f"Database connection failed: {e}")
+        sys.exit(1)
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse and return command line arguments."""
+    parser = argparse.ArgumentParser(description="Script description")
+    parser.add_argument("--mycli-config", required=True, default="~/.myclirc", help="mycli config file path")
+    parser.add_argument("--dsn", required=True, help="DSN alias name in mycli config")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    return parser.parse_args()
+
+def main():
+    """Main function - entry point of the script."""
+    args = parse_arguments()
+    setup_logging(args.log_level)
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Script started")
+    
+    try:
+        # Parse database configuration from mycli config
+        db_config = parse_mycli_config(args.mycli_config, args.dsn)
+        
+        # Database operations
+        conn = setup_database_connection(db_config)
+        
+        # Your script logic here
+        
+        conn.close()
+        logger.info("Script completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Script failed: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+```
+
+## Key Practices
+
+### Logging
+- Always use the `logging` module, never `print()` for application output
+- Configure both file and console handlers
+- Use appropriate log levels: DEBUG, INFO, WARNING, ERROR
+- Include timestamps and log levels in format
+
+### Command Line Arguments
+- Use `argparse` for all command-line input
+- Make database credentials required arguments
+- Provide help text for all arguments
+- Include `--log-level` option for debugging
+
+### Database Operations
+- Use `pymysql` with `DictCursor` for readable results  
+- **Preferred**: Read connection config from mycli config file using DSN aliases
+- Parse DSN format: `mysql://[user[:password]@][host][:port][/dbname]`
+- Always handle connection errors gracefully
+- Use try-except blocks around database operations
+- Close connections properly
+- Use parameterized queries to prevent SQL injection
+
+### mycli Configuration
+Create a mycli config file with DSN aliases:
+```ini
+# ~/.myclirc or custom config file
+[alias_data]
+production = mysql://user:password@prod-host:3306/production_db
+staging = mysql://user:password@staging-host:3306/staging_db
+local = mysql://root:@localhost:3306/local_db
+```
+
+### Error Handling
+- Use proper exception handling with specific error messages
+- Log errors before exiting
+- Exit with appropriate status codes (0 for success, 1 for error)
+
+### Dependencies
+Use Poetry for dependency management. Add packages using:
+```bash
+poetry add pymysql
+poetry add --group dev pytest  # For development dependencies
+```
+
+Required packages are defined in [pyproject.toml](mdc:pyproject.toml):
+```toml
+[tool.poetry.dependencies]
+python = "^3.8"
+pymysql = "^1.0.0"
+```
+
+## Poetry Usage
+
+### Setup and Installation
+```bash
+# Install dependencies
+poetry install
+
+# Activate virtual environment
+poetry shell
+
+# Run scripts within Poetry environment
+poetry run python script_name.py --host localhost --user myuser --password mypass --database mydb
+```
+
+### Adding Dependencies
+```bash
+# Add runtime dependencies
+poetry add pymysql tqdm
+
+# Add development dependencies
+poetry add --group dev pytest black flake8
+```
+
+### Usage Examples
+```bash
+# Run script with mycli config
+poetry run python script.py --mycli-config ~/.myclirc --dsn production
+
+# Run with custom config file
+poetry run python script.py --mycli-config ./db-config.ini --dsn staging --log-level DEBUG
+```
+
+## Common Patterns
+- Database connection pooling for multiple operations
+- Configuration files for repeated database credentials
+- Progress bars using `tqdm` for long-running operations
+- CSV/JSON output for data extraction scripts
+- Batch processing for large datasets

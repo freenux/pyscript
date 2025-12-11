@@ -7,6 +7,5 @@ CREATE TABLE exchange_rates (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后更新时间',
     
     PRIMARY KEY (id),
-    INDEX idx_base_currency (base_currency),
-    INDEX idx_data_provider (data_provider)
+    INDEX idx_data_updated_at (data_updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JSON格式汇率缓存表';

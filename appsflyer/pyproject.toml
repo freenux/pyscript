@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "appsflyer"
+version = "0.1.0"
+description = ""
+authors = ["freenux <freegly@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+pandas = "^2.2.3"
+boto3 = "^1.40.28"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
