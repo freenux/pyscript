@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 本脚本是AWS SDK自动获取认证信息的方式，在.aws/config的profile下赋值给配置项credential_process，
+# 参见文档：https://docs.aws.amazon.com/sdkref/latest/guide/feature-process-credentials.html
+
 # ================= 🔧 初始化 =================
 TARGET_PROFILE=""
 # 默认有效期: 3600秒 (1小时)
