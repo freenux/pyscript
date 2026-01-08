@@ -6,7 +6,7 @@
 PROXY_URL="http://127.0.0.1:15236"
 
 # 2. Claude 可执行文件路径
-CLAUDE_BIN="$HOME/.claude/local/node_modules/.bin/claude"
+CLAUDE_BIN="/usr/local/bin/claude"
 
 # 3. AWS Bedrock 设置
 ENABLE_BEDROCK=true
@@ -17,7 +17,7 @@ TOKEN_DURATION=3600
 ALLOWED_COUNTRIES=("US" "GB" "SG" "JP" "CA" "DE" "FR")
 
 # 5. 检测接口
-CHECK_URL="https://ifconfig.co/country-iso"
+CHECK_URL="https://ipinfo.io/country"
 
 # ==============================================
 
