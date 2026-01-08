@@ -6,7 +6,7 @@
 PROXY_URL="http://127.0.0.1:15236"
 
 # 2. Claude 可执行文件路径
-CLAUDE_BIN="/usr/local/bin/claude"
+CLAUDE_BIN="~/.local/bin/claude"
 
 # 3. AWS Bedrock 设置
 ENABLE_BEDROCK=true
@@ -35,7 +35,45 @@ is_allowed() {
     return 1
 }
 
+# 判断是否由参数或配置触发跳过安全检测
+should_skip_checks() {
+    # 1. 检查环境变量: 如果定义了自定义 API 地址，通常意味着使用第三方模型（如 Kimi, Minimax）
+    if [ -n "$ANTHROPIC_BASE_URL" ] || [ -n "$CLAUDE_BASE_URL" ]; then
+        return 0
+    fi
+
+    # 2. 检查命令行参数: 针对不调用 AI 模型的命令或帮助信息
+    # 包含: 帮助、版本、配置、MCP管理、医生检查、更新、插件管理等
+    for arg in "$@"; do
+        case "$arg" in
+            --help|-h|--version|-v|config|mcp|doctor|update|plugin|install|setup-token|release-notes|status)
+                return 0
+                ;;
+        esac
+    done
+
+    # 3. 检查配置文件: 如果 settings.json 中明确配置了非标准的 baseUrl
+    local config_files=("$HOME/.claude/settings.json" "./.claude/settings.json" "./.claude/settings.local.json")
+    for f in "${config_files[@]}"; do
+        if [ -f "$f" ]; then
+            if grep -qiE "baseUrl|base_url" "$f"; then
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
 # ================= 🚀 主程序开始 =================
+
+# --- 0. 跳过检测判断 (无感知执行) ---
+if should_skip_checks "$@"; then
+    CLAUDE_PATH=$(eval echo "$CLAUDE_BIN")
+    if [ -f "$CLAUDE_PATH" ]; then
+        exec "$CLAUDE_PATH" "$@"
+    fi
+fi
 
 echo "========================================"
 echo "🛡️  Claude 安全启动包装器"
@@ -79,9 +117,12 @@ fi
 echo "🚀 启动 Claude Code..."
 echo "----------------------------------------"
 
-if [ ! -f "$CLAUDE_BIN" ]; then
-    echo "❌ 错误：未找到 Claude 程序: $CLAUDE_BIN"
+# 路径展开 (处理 ~)
+CLAUDE_PATH=$(eval echo "$CLAUDE_BIN")
+
+if [ ! -f "$CLAUDE_PATH" ]; then
+    echo "❌ 错误：未找到 Claude 程序: $CLAUDE_PATH"
     exit 1
 fi
 
-exec "$CLAUDE_BIN" "$@"
+exec "$CLAUDE_PATH" "$@"
