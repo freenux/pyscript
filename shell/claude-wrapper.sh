@@ -16,14 +16,27 @@ TOKEN_DURATION=3600
 # 4. 支持直连的国家代码白名单 (ISO 3166-1 alpha-2)
 ALLOWED_COUNTRIES=("US" "GB" "SG" "JP" "CA" "DE" "FR")
 
-# 5. 检测接口
-CHECK_URL="https://ipinfo.io/country"
+# 5. 检测接口 (多个备份以防限流)
+CHECK_URLS=(
+    "https://ipinfo.io/country"
+    "https://ipapi.co/country"
+    "https://ifconfig.co/country"
+)
 
 # ==============================================
 
-# 获取国家代码
+# 获取国家代码 (带重试机制)
 get_country_code() {
-    curl -s --max-time 3 "$CHECK_URL" | tr -d '\n'
+    for url in "${CHECK_URLS[@]}"; do
+        local code
+        code=$(curl -s --max-time 2 "$url" | tr -d '[:space:]')
+        # 简单校验：应为2位字母代码
+        if [[ -n "$code" && ${#code} -eq 2 ]]; then
+            echo "$code"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # 判断国家是否在白名单
@@ -67,12 +80,18 @@ should_skip_checks() {
 
 # ================= 🚀 主程序开始 =================
 
-# --- 0. 跳过检测判断 (无感知执行) ---
+# --- 0. 环境预检查 (路径展开与存在性检查) ---
+CLAUDE_PATH=$(eval echo "$CLAUDE_BIN")
+
+if [ ! -f "$CLAUDE_PATH" ]; then
+    echo "❌ 错误：未找到 Claude 程序: $CLAUDE_PATH"
+    echo "请检查配置中的 CLAUDE_BIN 路径是否正确。"
+    exit 1
+fi
+
+# --- 1. 跳过检测判断 (无感知执行) ---
 if should_skip_checks "$@"; then
-    CLAUDE_PATH=$(eval echo "$CLAUDE_BIN")
-    if [ -f "$CLAUDE_PATH" ]; then
-        exec "$CLAUDE_PATH" "$@"
-    fi
+    exec "$CLAUDE_PATH" "$@"
 fi
 
 echo "========================================"
@@ -111,18 +130,6 @@ else
     else
         echo "✅ 代理验证通过！出口位置: $PROXY_COUNTRY"
     fi
-fi
-
-# --- 4. 启动 Claude ---
-echo "🚀 启动 Claude Code..."
-echo "----------------------------------------"
-
-# 路径展开 (处理 ~)
-CLAUDE_PATH=$(eval echo "$CLAUDE_BIN")
-
-if [ ! -f "$CLAUDE_PATH" ]; then
-    echo "❌ 错误：未找到 Claude 程序: $CLAUDE_PATH"
-    exit 1
 fi
 
 exec "$CLAUDE_PATH" "$@"
