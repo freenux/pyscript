@@ -23,10 +23,23 @@ CHECK_URLS=(
     "https://ifconfig.co/country"
 )
 
+# 6. 是否强制跳过安全检测 (默认 false)
+# 如果设为 true，则不检查 IP 归属地和代理，直接启动 Claude
+SKIP_SECURITY_CHECK=false
+
 # ==============================================
 
 # 获取国家代码 (带重试机制)
 get_country_code() {
+    # 1. 优先尝试 Cloudflare Trace (极少限流，速度极快)
+    code=$(curl -s --max-time 2 "https://cloudflare.com/cdn-cgi/trace" | grep "loc=" | cut -d'=' -f2 | tr -d '[:space:]')
+    
+    if [[ -n "$code" && ${#code} -eq 2 && "$code" != "XX" ]]; then
+        echo "$code"
+        return 0
+    fi
+
+    # 2. 备用方案：原有的普通公共 API
     for url in "${CHECK_URLS[@]}"; do
         local code
         code=$(curl -s --max-time 2 "$url" | tr -d '[:space:]')
@@ -50,6 +63,16 @@ is_allowed() {
 
 # 判断是否由参数或配置触发跳过安全检测
 should_skip_checks() {
+    # 0. 命令行强制跳过参数
+    if [ "$IS_SKIP_BY_ARG" = true ]; then
+        return 0
+    fi
+
+    # 1. 配置文件强制跳过配置
+    if [ "$SKIP_SECURITY_CHECK" = true ]; then
+        return 0
+    fi
+
     # 1. 检查环境变量: 如果定义了自定义 API 地址，通常意味着使用第三方模型（如 Kimi, Minimax）
     if [ -n "$ANTHROPIC_BASE_URL" ] || [ -n "$CLAUDE_BASE_URL" ]; then
         return 0
@@ -79,6 +102,23 @@ should_skip_checks() {
 }
 
 # ================= 🚀 主程序开始 =================
+
+# --- 处理自定义命令行选项 ---
+IS_SKIP_BY_ARG=false
+FINAL_ARGS=()
+
+for arg in "$@"; do
+    if [[ "$arg" == "--no-check" ]]; then
+        IS_SKIP_BY_ARG=true
+    else
+        FINAL_ARGS+=("$arg")
+    fi
+done
+
+# 如果检测到自定义参数，更新位置参数列表
+if [ "$IS_SKIP_BY_ARG" = true ]; then
+    set -- "${FINAL_ARGS[@]}"
+fi
 
 # --- 0. 环境预检查 (路径展开与存在性检查) ---
 CLAUDE_PATH=$(eval echo "$CLAUDE_BIN")
