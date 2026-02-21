@@ -1,85 +1,88 @@
 #!/bin/bash
 
-# ================= 🔧 用户配置区域 =================
+# ==================== User Configuration ====================
 
-# 1. 代理设置 (端口 15236)
+# 1. Proxy URL (used when direct connection is not in an allowed country)
 PROXY_URL="http://127.0.0.1:15236"
 
-# 2. Claude 可执行文件路径
+# 2. Path to the Claude executable
 CLAUDE_BIN="~/.local/bin/claude"
 
-# 3. AWS Bedrock 设置
+# 3. AWS Bedrock settings
 ENABLE_BEDROCK=true
-# 设置临时 Token 的有效期 (秒)，默认 3600 (1小时)，最长 129600 (36小时)
+# Duration for temporary tokens in seconds; default 3600 (1 hour), max 129600 (36 hours)
 TOKEN_DURATION=3600
 
-# 4. 支持直连的国家代码白名单 (ISO 3166-1 alpha-2)
+# 4. Countries that may connect directly without a proxy (ISO 3166-1 alpha-2)
 ALLOWED_COUNTRIES=("US" "GB" "SG" "JP" "CA" "DE" "FR")
 
-# 5. 检测接口 (多个备份以防限流)
+# 5. IP geolocation endpoints (multiple fallbacks in case of rate-limiting)
 CHECK_URLS=(
     "https://ipinfo.io/country"
     "https://ipapi.co/country"
     "https://ifconfig.co/country"
 )
 
-# 6. 是否强制跳过安全检测 (默认 false)
-# 如果设为 true，则不检查 IP 归属地和代理，直接启动 Claude
+# 6. Set to true to bypass all security checks and launch Claude directly
 SKIP_SECURITY_CHECK=false
 
-# ==============================================
+# ============================================================
 
-# 获取国家代码 (带重试机制)
+# Resolve the current country code, trying Cloudflare Trace first then fallback APIs.
+# Prints a 2-letter ISO country code on success; exits with status 1 on failure.
 get_country_code() {
-    # 1. 优先尝试 Cloudflare Trace (极少限流，速度极快)
+    # Cloudflare Trace is fast and rarely rate-limited
+    local code
     code=$(curl -s --max-time 2 "https://cloudflare.com/cdn-cgi/trace" | grep "loc=" | cut -d'=' -f2 | tr -d '[:space:]')
-    
+
     if [[ -n "$code" && ${#code} -eq 2 && "$code" != "XX" ]]; then
         echo "$code"
         return 0
     fi
 
-    # 2. 备用方案：原有的普通公共 API
+    # Fallback to public geolocation APIs
     for url in "${CHECK_URLS[@]}"; do
-        local code
         code=$(curl -s --max-time 2 "$url" | tr -d '[:space:]')
-        # 简单校验：应为2位字母代码
         if [[ -n "$code" && ${#code} -eq 2 ]]; then
             echo "$code"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Returns 0 if the given country code is in the allowed list, 1 otherwise.
+is_allowed() {
+    local code="$1"
+    for allowed in "${ALLOWED_COUNTRIES[@]}"; do
+        if [[ "$allowed" == "$code" ]]; then
             return 0
         fi
     done
     return 1
 }
 
-# 判断国家是否在白名单
-is_allowed() {
-    local code="$1"
-    for allowed in "${ALLOWED_COUNTRIES[@]}"; do
-        if [[ "$allowed" == "$code" ]]; then return 0; fi
-    done
-    return 1
-}
-
-# 判断是否由参数或配置触发跳过安全检测
+# Returns 0 if security checks should be skipped for this invocation.
+# Checks (in order): --no-check flag, SKIP_SECURITY_CHECK config, third-party API
+# base URL env vars, non-AI subcommands, and a non-standard baseUrl in settings files.
 should_skip_checks() {
-    # 0. 命令行强制跳过参数
-    if [ "$IS_SKIP_BY_ARG" = true ]; then
+    # Explicit --no-check flag passed on the command line
+    if [[ "$IS_SKIP_BY_ARG" == true ]]; then
         return 0
     fi
 
-    # 1. 配置文件强制跳过配置
-    if [ "$SKIP_SECURITY_CHECK" = true ]; then
+    # Config-level override
+    if [[ "$SKIP_SECURITY_CHECK" == true ]]; then
         return 0
     fi
 
-    # 1. 检查环境变量: 如果定义了自定义 API 地址，通常意味着使用第三方模型（如 Kimi, Minimax）
-    if [ -n "$ANTHROPIC_BASE_URL" ] || [ -n "$CLAUDE_BASE_URL" ]; then
+    # Custom API base URL implies a third-party model provider (e.g. Kimi, Minimax)
+    if [[ -n "$ANTHROPIC_BASE_URL" || -n "$CLAUDE_BASE_URL" ]]; then
         return 0
     fi
 
-    # 2. 检查命令行参数: 针对不调用 AI 模型的命令或帮助信息
-    # 包含: 帮助、版本、配置、MCP管理、医生检查、更新、插件管理等
+    # Subcommands that do not invoke an AI model
     for arg in "$@"; do
         case "$arg" in
             --help|-h|--version|-v|config|mcp|doctor|update|plugin|install|setup-token|release-notes|status)
@@ -88,22 +91,20 @@ should_skip_checks() {
         esac
     done
 
-    # 3. 检查配置文件: 如果 settings.json 中明确配置了非标准的 baseUrl
+    # Non-standard baseUrl in any Claude settings file also implies third-party routing
     local config_files=("$HOME/.claude/settings.json" "./.claude/settings.json" "./.claude/settings.local.json")
     for f in "${config_files[@]}"; do
-        if [ -f "$f" ]; then
-            if grep -qiE "baseUrl|base_url" "$f"; then
-                return 0
-            fi
+        if [[ -f "$f" ]] && grep -qiE "baseUrl|base_url" "$f"; then
+            return 0
         fi
     done
 
     return 1
 }
 
-# ================= 🚀 主程序开始 =================
+# ==================== Main ====================
 
-# --- 处理自定义命令行选项 ---
+# Strip the --no-check wrapper flag before passing arguments to Claude
 IS_SKIP_BY_ARG=false
 FINAL_ARGS=()
 
@@ -115,60 +116,56 @@ for arg in "$@"; do
     fi
 done
 
-# 如果检测到自定义参数，更新位置参数列表
-if [ "$IS_SKIP_BY_ARG" = true ]; then
-    set -- "${FINAL_ARGS[@]}"
-fi
+set -- "${FINAL_ARGS[@]}"
 
-# --- 0. 环境预检查 (路径展开与存在性检查) ---
+# Expand tilde in CLAUDE_BIN and verify the binary exists
 CLAUDE_PATH=$(eval echo "$CLAUDE_BIN")
 
-if [ ! -f "$CLAUDE_PATH" ]; then
-    echo "❌ 错误：未找到 Claude 程序: $CLAUDE_PATH"
-    echo "请检查配置中的 CLAUDE_BIN 路径是否正确。"
+if [[ ! -f "$CLAUDE_PATH" ]]; then
+    echo "❌ Error: Claude binary not found at: $CLAUDE_PATH"
+    echo "👉 Check the CLAUDE_BIN path in this script's configuration."
     exit 1
 fi
 
-# --- 1. 跳过检测判断 (无感知执行) ---
+# Skip all network checks when not needed
 if should_skip_checks "$@"; then
     exec "$CLAUDE_PATH" "$@"
 fi
 
 echo "========================================"
-echo "🛡️  Claude 安全启动包装器"
+echo "  🛡️  Claude Secure Wrapper"
 echo "========================================"
 
-# --- 1. 网络环境检测 ---
+# Detect the current outbound country
 CURRENT_COUNTRY=$(get_country_code)
 
-if [ -n "$CURRENT_COUNTRY" ] && is_allowed "$CURRENT_COUNTRY"; then
-    echo "✅ 直连环境合规 ($CURRENT_COUNTRY)"
+if [[ -n "$CURRENT_COUNTRY" ]] && is_allowed "$CURRENT_COUNTRY"; then
+    echo "✅ Direct connection allowed ($CURRENT_COUNTRY)"
     unset HTTP_PROXY HTTPS_PROXY ALL_PROXY
 else
-    # --- 2. 设置代理 ---
-    if [ -z "$CURRENT_COUNTRY" ]; then
-        echo "⚠️  直连检测超时，默认启用代理..."
+    if [[ -z "$CURRENT_COUNTRY" ]]; then
+        echo "⚠️  Country detection timed out; enabling proxy by default..."
     else
-        echo "🌍 当前直连位置: $CURRENT_COUNTRY (不支持)，切换代理..."
+        echo "🌐 Direct connection from $CURRENT_COUNTRY is not allowed; switching to proxy..."
     fi
 
     export HTTP_PROXY="$PROXY_URL"
     export HTTPS_PROXY="$PROXY_URL"
     export ALL_PROXY="$PROXY_URL"
 
-    # --- 3. 代理二次校验 (Fail-Close) ---
-    echo "🔄 验证代理连通性..."
+    # Verify the proxy actually exits from an allowed country (fail-closed)
+    echo "🔍 Verifying proxy connectivity..."
     PROXY_COUNTRY=$(get_country_code)
 
-    if [ -z "$PROXY_COUNTRY" ]; then
-        echo "❌ 错误：代理无法联网，请检查 Clash/v2ray (端口 15236)。"
+    if [[ -z "$PROXY_COUNTRY" ]]; then
+        echo "❌ Error: Proxy cannot reach the internet. Check Clash/v2ray on port 15236."
         exit 1
     elif ! is_allowed "$PROXY_COUNTRY"; then
-        echo "❌ 危险：代理后位置为 $PROXY_COUNTRY (未在支持名单)。"
-        echo "🚫 已阻断连接，保护账号安全。"
+        echo "❌ Error: Proxy exit country $PROXY_COUNTRY is not in the allowed list."
+        echo "🚫 Connection blocked to protect account safety."
         exit 1
     else
-        echo "✅ 代理验证通过！出口位置: $PROXY_COUNTRY"
+        echo "✅ Proxy verified. Exit country: $PROXY_COUNTRY"
     fi
 fi
 
