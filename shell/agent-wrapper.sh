@@ -5,33 +5,50 @@
 # 1. Proxy URL (used when direct connection is not in an allowed country)
 PROXY_URL="http://127.0.0.1:15236"
 
-# 2. Path to the Claude executable
-CLAUDE_BIN="~/.local/bin/claude"
-
-# 3. AWS Bedrock settings
-ENABLE_BEDROCK=true
-# Duration for temporary tokens in seconds; default 3600 (1 hour), max 129600 (36 hours)
-TOKEN_DURATION=3600
-
-# 4. Countries that may connect directly without a proxy (ISO 3166-1 alpha-2)
+# 2. Countries that may connect directly without a proxy (ISO 3166-1 alpha-2)
 ALLOWED_COUNTRIES=("US" "GB" "SG" "JP" "CA" "DE" "FR")
 
-# 5. IP geolocation endpoints (multiple fallbacks in case of rate-limiting)
+# 3. IP geolocation endpoints (multiple fallbacks in case of rate-limiting)
 CHECK_URLS=(
     "https://ipinfo.io/country"
     "https://ipapi.co/country"
     "https://ifconfig.co/country"
 )
 
-# 6. Set to true to bypass all security checks and launch Claude directly
+# 4. Set to true to bypass all security checks and launch the agent directly
 SKIP_SECURITY_CHECK=false
+
+# 5. Per-agent config: binary path and env file to source before exec.
+#    env file is optional — missing files are silently skipped.
+#    Add more `case` branches below to support new agents.
+resolve_agent() {
+    case "$1" in
+        claude)
+            BIN="$HOME/.local/bin/claude"
+            ENV_FILE="$HOME/.claude/env"
+            ;;
+        codex)
+            BIN="/opt/homebrew/bin/codex"
+            ENV_FILE="$HOME/.codex/env"
+            ;;
+        gemini)
+            BIN="$HOME/.local/bin/gemini"
+            ENV_FILE="$HOME/.gemini/env"
+            ;;
+        *)
+            echo "❌ Unknown agent: $1" >&2
+            echo "👉 Supported: claude, codex, gemini" >&2
+            echo "👉 Add a new case branch in agent-wrapper.sh to extend." >&2
+            exit 1
+            ;;
+    esac
+}
 
 # ============================================================
 
 # Resolve the current country code, trying Cloudflare Trace first then fallback APIs.
 # Prints a 2-letter ISO country code on success; exits with status 1 on failure.
 get_country_code() {
-    # Cloudflare Trace is fast and rarely rate-limited
     local code
     code=$(curl -s --max-time 2 "https://cloudflare.com/cdn-cgi/trace" | grep "loc=" | cut -d'=' -f2 | tr -d '[:space:]')
 
@@ -40,7 +57,6 @@ get_country_code() {
         return 0
     fi
 
-    # Fallback to public geolocation APIs
     for url in "${CHECK_URLS[@]}"; do
         code=$(curl -s --max-time 2 "$url" | tr -d '[:space:]')
         if [[ -n "$code" && ${#code} -eq 2 ]]; then
@@ -64,47 +80,26 @@ is_allowed() {
 }
 
 # Returns 0 if security checks should be skipped for this invocation.
-# Checks (in order): --no-check flag, SKIP_SECURITY_CHECK config, third-party API
-# base URL env vars, non-AI subcommands, and a non-standard baseUrl in settings files.
 should_skip_checks() {
-    # Explicit --no-check flag passed on the command line
-    if [[ "$IS_SKIP_BY_ARG" == true ]]; then
-        return 0
-    fi
-
-    # Config-level override
-    if [[ "$SKIP_SECURITY_CHECK" == true ]]; then
-        return 0
-    fi
-
-    # Custom API base URL implies a third-party model provider (e.g. Kimi, Minimax)
-    if [[ -n "$ANTHROPIC_BASE_URL" || -n "$CLAUDE_BASE_URL" ]]; then
-        return 0
-    fi
-
-    # Subcommands that do not invoke an AI model
-    for arg in "$@"; do
-        case "$arg" in
-            --help|-h|--version|-v|config|mcp|doctor|update|plugin|install|setup-token|release-notes|status)
-                return 0
-                ;;
-        esac
-    done
-
-    # Non-standard baseUrl in any Claude settings file also implies third-party routing
-    local config_files=("$HOME/.claude/settings.json" "./.claude/settings.json" "./.claude/settings.local.json")
-    for f in "${config_files[@]}"; do
-        if [[ -f "$f" ]] && grep -qiE "baseUrl|base_url" "$f"; then
-            return 0
-        fi
-    done
-
+    [[ "$IS_SKIP_BY_ARG" == true ]] && return 0
+    [[ "$SKIP_SECURITY_CHECK" == true ]] && return 0
     return 1
 }
 
 # ==================== Main ====================
 
-# Strip the --no-check wrapper flag before passing arguments to Claude
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $(basename "$0") <agent> [--no-check] [agent-args...]" >&2
+    echo "Supported agents: claude, codex, gemini" >&2
+    exit 1
+fi
+
+AGENT="$1"
+shift
+
+resolve_agent "$AGENT"
+
+# Strip the --no-check wrapper flag before passing arguments to the agent
 IS_SKIP_BY_ARG=false
 FINAL_ARGS=()
 
@@ -118,22 +113,31 @@ done
 
 set -- "${FINAL_ARGS[@]}"
 
-# Expand tilde in CLAUDE_BIN and verify the binary exists
-CLAUDE_PATH=$(eval echo "$CLAUDE_BIN")
+# Expand tilde in BIN and verify the binary exists
+BIN_PATH=$(eval echo "$BIN")
 
-if [[ ! -f "$CLAUDE_PATH" ]]; then
-    echo "❌ Error: Claude binary not found at: $CLAUDE_PATH"
-    echo "👉 Check the CLAUDE_BIN path in this script's configuration."
+if [[ ! -f "$BIN_PATH" ]]; then
+    echo "❌ Error: $AGENT binary not found at: $BIN_PATH"
+    echo "👉 Update the resolve_agent() case branch for '$AGENT' in this script."
     exit 1
 fi
 
+load_env() {
+    if [[ -n "$ENV_FILE" && -f "$ENV_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$ENV_FILE"
+    fi
+}
+
 # Skip all network checks when not needed
-if should_skip_checks "$@"; then
-    exec "$CLAUDE_PATH" "$@"
+if should_skip_checks; then
+    load_env
+    exec "$BIN_PATH" "$@"
 fi
 
+AGENT_UPPER=$(echo "$AGENT" | tr '[:lower:]' '[:upper:]')
 echo "========================================"
-echo "  🛡️  Claude Secure Wrapper"
+echo "  🛡️  $AGENT_UPPER Secure Wrapper"
 echo "========================================"
 
 # Detect the current outbound country
@@ -158,7 +162,7 @@ else
     PROXY_COUNTRY=$(get_country_code)
 
     if [[ -z "$PROXY_COUNTRY" ]]; then
-        echo "❌ Error: Proxy cannot reach the internet. Check Clash/v2ray on port 15236."
+        echo "❌ Error: Proxy cannot reach the internet. Check Clash/v2ray on ${PROXY_URL}."
         exit 1
     elif ! is_allowed "$PROXY_COUNTRY"; then
         echo "❌ Error: Proxy exit country $PROXY_COUNTRY is not in the allowed list."
@@ -169,6 +173,5 @@ else
     fi
 fi
 
-# Load claude environment variables
-source $HOME/.claude/env
-exec "$CLAUDE_PATH" "$@"
+load_env
+exec "$BIN_PATH" "$@"
