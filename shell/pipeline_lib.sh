@@ -123,6 +123,26 @@ require_cmd() {
     done
 }
 
+require_dir() {
+    local dir
+    for dir in "$@"; do
+        if [ ! -d "$dir" ]; then
+            log_error "缺少必要目录: $dir"
+            return 1
+        fi
+    done
+}
+
+require_file() {
+    local file
+    for file in "$@"; do
+        if [ ! -f "$file" ]; then
+            log_error "缺少必要文件: $file"
+            return 1
+        fi
+    done
+}
+
 # ============================================================
 # 五、内部函数
 # ============================================================
