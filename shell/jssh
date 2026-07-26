@@ -1,0 +1,369 @@
+#!/bin/sh
+# jssh 是 sh/expect 混合脚本: 下一行由 sh 执行, 对 Tcl 来说是被反斜杠续行的注释。
+# 这样写是为了让 -l/-c 这类参数不被 expect 自己的选项解析吃掉。\
+exec /usr/bin/expect -f "$0" -- ${1+"$@"}
+#
+# jssh — 非交互登录 JumpServer 堡垒机(stary)后面的 AWS 服务器
+#
+#   jssh web                  登录别名 web
+#   jssh 172.31.62.16         直接用 IP
+#   jssh web duser            指定系统用户
+#   jssh -c "df -h" web       跑一条命令就退出(适合脚本/CI)
+#   jssh --mfa 123456 web     建连时自动提交 MFA 动态口令
+#   jssh -l                   列出所有有权限的资产
+#   jssh -v web               显示菜单交互过程(排错用)
+#
+# 别名表: ~/.jssh_hosts   每行 "别名 IP [默认系统用户]"
+#
+# 依赖: /usr/bin/expect (macOS 自带) + ~/.ssh/config 里的 Host stary
+#
+
+set JUMP       "stary"
+set HOSTS_FILE "$env(HOME)/.jssh_hosts"
+
+# ---------------------------------------------------------------- 工具
+
+proc strip_ansi {s} {
+    regsub -all "\x1b\\\[\[0-9;?\]*\[a-zA-Z\]" $s "" s
+    regsub -all "\x1b\\\]\[0-9\];\[^\x07\]*\x07" $s "" s
+    regsub -all "\r" $s "" s
+    return $s
+}
+
+proc die {msg} {
+    puts stderr "jssh: $msg"
+    exit 1
+}
+
+proc usage {} {
+    puts "用法: jssh \[选项\] <别名|IP|主机名> \[系统用户\]"
+    puts ""
+    puts "  -c, --command <cmd>   执行命令后退出(非交互模式)"
+    puts "  -u, --user <user>     指定系统用户 (等同第二个位置参数)"
+    puts "  -m, --mfa <code>      建立复用连接时提交 MFA 动态口令"
+    puts "  -l, --list            列出所有有权限的资产"
+    puts "  -v, --verbose         显示堡垒机菜单交互过程"
+    puts "  -h, --help            显示本帮助"
+    puts ""
+    puts "别名表: ~/.jssh_hosts  (每行: 别名 IP \[默认系统用户\])"
+}
+
+# ---------------------------------------------------------------- 参数
+
+set target  ""
+set sysuser ""
+set command ""
+set mfa     ""
+set verbose 0
+set dolist  0
+
+for {set i 0} {$i < [llength $argv]} {incr i} {
+    set a [lindex $argv $i]
+    switch -glob -- $a {
+        -c - --command {
+            if {$i + 1 >= [llength $argv]} { die "选项 $a 缺少命令参数" }
+            incr i
+            set command [lindex $argv $i]
+        }
+        -u - --user {
+            if {$i + 1 >= [llength $argv]} { die "选项 $a 缺少用户名参数" }
+            incr i
+            set sysuser [lindex $argv $i]
+        }
+        -m - -mfa - --mfa {
+            if {$i + 1 >= [llength $argv]} { die "选项 $a 缺少 MFA 动态口令" }
+            incr i
+            set mfa [lindex $argv $i]
+            if {![regexp {^[0-9]{6}$} $mfa]} {
+                die "MFA 动态口令必须是 6 位数字"
+            }
+        }
+        -l - --list    { set dolist 1 }
+        -v - --verbose { set verbose 1 }
+        -h - --help    { usage; exit 0 }
+        -*             { die "未知选项: $a" }
+        default {
+            if {$target eq ""} { set target $a } \
+            elseif {$sysuser eq ""} { set sysuser $a } \
+            else { die "参数过多: $a" }
+        }
+    }
+}
+
+if {!$dolist && $target eq ""} { usage; exit 1 }
+
+# ---------------------------------------------------------------- 别名解析
+
+if {$target ne "" && [file readable $HOSTS_FILE]} {
+    set fh [open $HOSTS_FILE r]
+    set body [read $fh]
+    close $fh
+    foreach line [split $body "\n"] {
+        set line [string trim $line]
+        if {$line eq "" || [string index $line 0] eq "#"} { continue }
+        set f [regexp -all -inline {\S+} $line]
+        if {[lindex $f 0] eq $target} {
+            set target [lindex $f 1]
+            if {$sysuser eq "" && [llength $f] > 2} { set sysuser [lindex $f 2] }
+            break
+        }
+    }
+}
+
+# ---------------------------------------------------------------- 终端尺寸
+
+set real_rows 40
+set real_cols 120
+catch {
+    set sz [exec stty size < /dev/tty]
+    set real_rows [lindex $sz 0]
+    set real_cols [lindex $sz 1]
+}
+# 菜单导航期间用大窗口, 避免 JumpServer 按终端高度分页把列表切碎
+set nav_rows 80
+set nav_cols 250
+
+# ---------------------------------------------------------------- 复用连接
+#
+# ~/.ssh/config 里 stary 已配 ControlMaster auto / ControlPersist 240m。
+# 复用 socket 活着 -> 后续全部免密。这是整个脚本能"非交互"的前提。
+
+# 注意: ssh -O check 把 "Master running" 写到 stderr, Tcl 的 exec 见到 stderr
+# 就抛异常(哪怕退出码为 0), 所以必须丢掉 stderr, 否则永远误判成连接已断。
+proc master_alive {jump} {
+    return [expr {![catch {exec ssh -O check $jump 2>/dev/null}]}]
+}
+
+if {![master_alive $JUMP]} {
+    # 跳板机要 6 位动态口令(MFA), 可用 --mfa 自动提交或手输一次。
+    # 建连后 ControlPersist 240m 内所有 jssh 调用都免认证。
+    # 想彻底免掉这一步: 把公钥传到 JumpServer 个人设置里。
+    if {$mfa ne ""} {
+        puts stderr "jssh: 使用 MFA 建立到 $JUMP 的复用连接(之后 4 小时免认证)..."
+
+        # 认证阶段始终关闭输出，避免服务端意外回显动态口令。
+        log_user 0
+        set timeout 60
+        set mfa_sent 0
+        spawn -noecho ssh -MNf $JUMP
+        expect {
+            -re {(?i)(verification([ -]?code)?|one[ -]?time([ -]?password)?|mfa|otp|动态口令|验证码)[^:\r\n]*[:：][ \t]*$} {
+                if {$mfa_sent} {
+                    catch { close }
+                    catch { wait }
+                    die "MFA 验证失败，请确认动态口令仍在有效期内"
+                }
+                send -- "$mfa\r"
+                set mfa_sent 1
+                exp_continue
+            }
+            # 部分 SSH/JumpServer 版本把 MFA 挑战显示为 Password。
+            -re {(?i)(password|passcode|密码)[^:\r\n]*[:：][ \t]*$} {
+                if {$mfa_sent} {
+                    catch { close }
+                    catch { wait }
+                    die "MFA 验证失败，请确认动态口令仍在有效期内"
+                }
+                send -- "$mfa\r"
+                set mfa_sent 1
+                exp_continue
+            }
+            -re {(?i)(permission denied|authentication failed|认证失败)} {
+                catch { close }
+                catch { wait }
+                die "MFA 验证失败，请确认动态口令仍在有效期内"
+            }
+            -re {(?i)are you sure you want to continue connecting} {
+                catch { close }
+                catch { wait }
+                die "首次连接需确认主机指纹，请先手动执行: ssh $JUMP"
+            }
+            eof {}
+            timeout {
+                catch { close }
+                catch { wait }
+                die "等待跳板机 MFA 认证超时"
+            }
+        }
+        catch { wait }
+    } else {
+        puts stderr "jssh: 建立到 $JUMP 的复用连接(需输入一次密码/动态口令, 之后 4 小时免认证)..."
+        catch { exec ssh -MNf $JUMP >@stdout 2>@stderr <@stdin }
+    }
+
+    if {![master_alive $JUMP]} {
+        die "无法连接跳板机 $JUMP\n     请在终端手动执行一次: ssh -MNf $JUMP"
+    }
+}
+
+# ---------------------------------------------------------------- 连接
+
+if {$verbose} { log_user 1 } else { log_user 0 }
+set timeout 30
+
+spawn -noecho ssh -tt $JUMP
+# 默认 match_max 只有 2000 字节, 装不下资产表/系统用户表 -> 解析会截断
+match_max 200000
+catch { stty rows $nav_rows cols $nav_cols < $spawn_out(slave,name) }
+
+expect {
+    -re {Opt>\s*$} {}
+    eof     { die "堡垒机连接被关闭" }
+    timeout { die "未等到 JumpServer 主菜单(Opt>)" }
+}
+
+# ------------------------------------------------- 列表模式
+
+if {$dolist} {
+    send -- "p\r"
+    expect {
+        -re {\[Host\]>\s*$} {}
+        timeout { die "获取资产列表超时" }
+    }
+    set out [strip_ansi $expect_out(buffer)]
+    log_user 0
+    catch { send -- "q\r" }
+    catch { send -- "q\r" }
+    puts $out
+    exit 0
+}
+
+# ------------------------------------------------- 搜索目标主机
+
+send -- "$target\r"
+
+set need_pick 0
+expect {
+    -re {ID>\s*$}          { set need_pick 1 }
+    -re {\[Host\]>\s*$}    {
+        set out [strip_ansi $expect_out(buffer)]
+        log_user 0
+        catch { send -- "q\r" }
+        # 搜不到时 JumpServer 也落到 [Host]> , 但内容是"没有资产", 要分开报
+        if {[string match "*没有资产*" $out]} {
+            die "\"$target\" 没有匹配到任何主机(用 jssh -l 查看有权限的资产)"
+        }
+        puts stderr "jssh: \"$target\" 匹配到多台主机, 请用更精确的 IP/主机名:\n"
+        puts stderr $out
+        exit 1
+    }
+    -re {Opt>\s*$}         { die "\"$target\" 没有匹配到任何主机(可试 jssh -l 查看资产列表)" }
+    -re {开始连接到}        { set need_pick 0 }
+    eof                    { die "连接被关闭" }
+    timeout                { die "搜索主机超时" }
+}
+
+# ------------------------------------------------- 选系统用户
+#
+# JumpServer 的系统用户 ID 是随当前列表变化的序号, 写死必错。
+# 这里解析表格, 按"用户名"列匹配。
+
+if {$need_pick} {
+    set table [strip_ansi $expect_out(buffer)]
+    set rows {}
+    foreach line [split $table "\n"] {
+        if {[regexp {^\s*(\d+)\s*\|([^|]*)\|\s*(\S+)} $line -> id _name uname]} {
+            lappend rows [list $id [string trim $uname]]
+        }
+    }
+
+    if {[llength $rows] == 0} { die "无法解析系统用户列表" }
+
+    set choice ""
+    if {$sysuser ne ""} {
+        foreach r $rows {
+            if {[lindex $r 1] eq $sysuser} { set choice [lindex $r 0]; break }
+        }
+        if {$choice eq ""} {
+            log_user 0
+            catch { send -- "b\r"; send -- "q\r" }
+            set avail {}
+            foreach r $rows { lappend avail [lindex $r 1] }
+            die "主机 $target 上没有系统用户 \"$sysuser\", 可用: [join $avail {, }]"
+        }
+    } elseif {[llength $rows] == 1} {
+        set choice [lindex [lindex $rows 0] 0]
+    } else {
+        log_user 0
+        catch { send -- "b\r"; send -- "q\r" }
+        set avail {}
+        foreach r $rows { lappend avail [lindex $r 1] }
+        die "主机 $target 有多个系统用户, 请指定一个: [join $avail {, }]\n     例如: jssh $target [lindex $avail 0]"
+    }
+
+    send -- "$choice\r"
+}
+
+# ---------------------------------------------------------------- 命令模式
+
+if {$command ne ""} {
+    # 等 shell 就绪; 等不到也继续(PTY 会缓冲输入)
+    set timeout 30
+    expect {
+        -re {[\$#] $} {}
+        timeout       {}
+    }
+    log_user 0
+    # 用唯一标记框住输出, 不依赖对端 PS1 长什么样
+    send -- "echo __JSSH_BEG__; $command; echo __JSSH_END__:\$?\r"
+    set timeout 300
+    catch { set timeout [expr {int($env(JSSH_TIMEOUT))}] }
+    expect {
+        -re {__JSSH_END__:(\d+)} { set rc $expect_out(1,string) }
+        # 命令若把远端 shell 干掉(如 exit/kill), 标记永远不会出现,
+        # 会退回堡垒机菜单 -> 必须识别, 否则就是死等到超时。
+        -re {ID>\s*$}  { catch { send -- "b\r"; send -- "q\r" }
+                         die "远端 shell 已退出, 命令未能返回结果" }
+        -re {Opt>\s*$} { catch { send -- "q\r" }
+                         die "远端 shell 已退出, 命令未能返回结果" }
+        eof     { die "命令执行期间连接中断" }
+        timeout { die "命令执行超时(${timeout}s), 可用 JSSH_TIMEOUT 调整" }
+    }
+    set raw [strip_ansi $expect_out(buffer)]
+
+    # 取两个标记之间的内容, 丢掉命令回显那一行
+    set body ""
+    if {[regexp "__JSSH_BEG__\n(.*)__JSSH_END__" $raw -> body]} {
+        # ok
+    } elseif {[regexp "__JSSH_BEG__(.*)__JSSH_END__" $raw -> body]} {
+        # ok
+    }
+    set lines [split $body "\n"]
+    # 首行可能是命令回显残留
+    if {[llength $lines] > 0 && [string match "*__JSSH_BEG__*" [lindex $lines 0]]} {
+        set lines [lrange $lines 1 end]
+    }
+    set body [join $lines "\n"]
+    set body [string trimright $body "\n"]
+    if {$body ne ""} { puts $body }
+
+    catch { send -- "exit\r" }
+    catch { send -- "b\r" }
+    catch { send -- "q\r" }
+    catch { close }
+    catch { wait }
+    exit $rc
+}
+
+# ---------------------------------------------------------------- 交互模式
+
+# 恢复真实终端尺寸, 否则 vim/top 显示会错乱
+catch { stty rows $real_rows cols $real_cols < $spawn_out(slave,name) }
+
+# 终端窗口变化时同步给远端
+trap {
+    catch {
+        set sz [exec stty size < /dev/tty]
+        stty rows [lindex $sz 0] cols [lindex $sz 1] < $spawn_out(slave,name)
+    }
+} WINCH
+
+log_user 1
+send -- "\r"
+
+# 远端 shell 退出后会回到堡垒机菜单; 自动逐层退出, 行为对齐原生 ssh
+interact {
+    -o
+    -re {ID>\s*$}  { send -- "b\r" }
+    -re {Opt>\s*$} { send -- "q\r" }
+}
