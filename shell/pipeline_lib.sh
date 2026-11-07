@@ -4,6 +4,7 @@
 # 使用方式:
 # > source pipeline_lib.sh
 # > pipeline_init "test_pipeline" "/var/log/recall"
+# > pipeline_init "test_pipeline" "/var/log/recall" 0  # 仅写入日志文件
 # > run_step "step1" echo "hello"
 # > run_step "step2" python3 not_exist.py   # 故意失败
 # > run_step "step3" echo "world"           # 不会执行到这里
@@ -17,9 +18,18 @@ _PIPELINE_LIB_LOADED=1
 # ============================================================
 
 pipeline_init() {
-    # 用法: pipeline_init <脚本名> [日志目录]
+    # 用法: pipeline_init <脚本名> [日志目录] [输出到stdout: 1或0，默认1]
     local script_name=${1:-$(basename "${BASH_SOURCE[1]}" .sh)}
     local log_dir=${2:-/var/log/pipeline}
+    local log_stdout=${3:-1}
+
+    case "$log_stdout" in
+        0|1) ;;
+        *)
+            printf '%s\n' 'pipeline_init: stdout开关必须为1或0' >&2
+            return 2
+            ;;
+    esac
 
     set -Eeuo pipefail
 
@@ -29,7 +39,11 @@ pipeline_init() {
     PIPELINE_CURRENT_STEP=""
 
     mkdir -p "$log_dir"
-    exec > >(tee -a "$PIPELINE_LOG_FILE") 2>&1
+    if [ "$log_stdout" = "1" ]; then
+        exec > >(tee -a "$PIPELINE_LOG_FILE") 2>&1
+    else
+        exec >> "$PIPELINE_LOG_FILE" 2>&1
+    fi
 
     trap '_on_error "$LINENO" "$?"' ERR
     trap '_on_exit'          EXIT
