@@ -18,15 +18,16 @@ _PIPELINE_LIB_LOADED=1
 # ============================================================
 
 pipeline_init() {
-    # 用法: pipeline_init <脚本名> [日志目录] [输出到stdout: 1或0，默认1]
+    # 用法: pipeline_init <脚本名> [日志目录] [终端输出: 1或0，默认0]
+    # 0: stdout和stderr仅写入日志文件；1: 同时输出到终端和日志文件。
     local script_name=${1:-$(basename "${BASH_SOURCE[1]}" .sh)}
     local log_dir=${2:-/var/log/pipeline}
-    local log_stdout=${3:-1}
+    local log_console=${3:-0}
 
-    case "$log_stdout" in
+    case "$log_console" in
         0|1) ;;
         *)
-            printf '%s\n' 'pipeline_init: stdout开关必须为1或0' >&2
+            printf '%s\n' 'pipeline_init: 终端输出开关必须为1或0' >&2
             return 2
             ;;
     esac
@@ -39,9 +40,20 @@ pipeline_init() {
     PIPELINE_CURRENT_STEP=""
 
     mkdir -p "$log_dir"
-    if [ "$log_stdout" = "1" ]; then
-        exec > >(tee -a "$PIPELINE_LOG_FILE") 2>&1
+    if [ "$log_console" = "1" ]; then
+        # 文件记录完整内容；终端对超过1024字符的stdout行仅显示首尾各516字符。
+        # stderr保持原样输出到终端，并写入同一日志文件。
+        exec > >(tee -a "$PIPELINE_LOG_FILE" | awk '{
+            if (length($0) > 1024) {
+                print substr($0, 1, 516)
+                print substr($0, length($0) - 515)
+                next
+            }
+            print
+        }') \
+             2> >(tee -a "$PIPELINE_LOG_FILE" >&2)
     else
+        # 将stdout和stderr全部追加到日志文件，关闭两者的终端输出。
         exec >> "$PIPELINE_LOG_FILE" 2>&1
     fi
 
@@ -173,5 +185,9 @@ _on_error() {
 }
 
 _on_exit() {
+    log_info "==============================="
+    log_info "Pipeline:      $PIPELINE_NAME"
+    log_info "Done:          $(date)"
     log_info "Total elapsed: $(( $(date +%s) - ${PIPELINE_START_TIME:-$(date +%s)} ))s"
+    log_info "==============================="
 }
